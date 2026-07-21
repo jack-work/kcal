@@ -6,6 +6,11 @@
 // share. `mv` is a partial update — sets a subset of fields. Dates
 // accept anything time.ParseInLocation understands via `dateparse`
 // wrappers; the raw form '2026-07-30T09:00:00-04:00' always works too.
+//
+// Machine-readable output: every data-producing command accepts --json.
+// `ls` also accepts --jsonl (line-delimited, one object per line — better
+// for streaming and `jq -c`). Human output goes to stdout in a friendly
+// shape; diagnostics + errors always go to stderr. See clig.dev.
 package main
 
 import (
@@ -14,8 +19,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -24,6 +31,10 @@ import (
 	"github.com/jack-work/kcal/internal/api"
 	"github.com/jack-work/kcal/internal/auth"
 )
+
+// version is stamped in via -ldflags at build time. Left as "dev" so
+// `kcal --version` always answers even in local go builds.
+var version = "dev"
 
 func envDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -42,8 +53,13 @@ var (
 )
 
 func main() {
+	// clig.dev: SIGPIPE (broken downstream pipe like `kcal ls | head`)
+	// should exit quietly. Ignoring the signal turns the broken write
+	// into an EPIPE error we catch below and swallow.
+	signal.Ignore(syscall.SIGPIPE)
+
 	if len(os.Args) < 2 {
-		usage()
+		usage(os.Stderr)
 		os.Exit(2)
 	}
 	cmd := os.Args[1]
@@ -70,20 +86,29 @@ func main() {
 	case "share":
 		err = cmdShare()
 	case "help", "-h", "--help":
-		usage()
+		usage(os.Stdout)
+		return
+	case "--version", "-V":
+		fmt.Println("kcal", version)
+		return
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
-		usage()
+		usage(os.Stderr)
 		os.Exit(2)
 	}
 	if err != nil {
+		if errors.Is(err, syscall.EPIPE) {
+			return
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, `usage: kcal <command> [args...]
+// usage renders the help block. Stdout for --help (exit 0), stderr for
+// misuse (exit 2). Per clig.dev.
+func usage(w *os.File) {
+	fmt.Fprintln(w, `usage: kcal <command> [args...]
 
 commands:
   login                              authenticate via device flow
@@ -104,6 +129,14 @@ add / mv flags:
   --all-day             all-day event (start uses date only)
   --rrule "RRULE"       RFC 5545 RRULE text (RRULE:FREQ=WEEKLY;...)
   --title "TITLE"       (mv only) rename the event
+
+machine-readable output (see clig.dev):
+  --json                emit JSON on stdout (ls, whoami, add, get, mv, share)
+  --jsonl               emit JSON Lines, one object per line (ls only)
+
+global:
+  -h, --help            show this help and exit 0
+  -V, --version         show version and exit 0
 
 env:
   KCAL_API         default: https://cal.kelliher.info
@@ -141,6 +174,58 @@ func newAPIClient() (*api.Client, error) {
 
 // ── commands ──────────────────────────────────────────────────────────
 
+// outputMode picks the serialization: text (default), json (pretty), or
+// jsonl (line-delimited). Per clig.dev, structured output is a first-class
+// mode alongside human output rather than a separate command.
+type outputMode int
+
+const (
+	outText outputMode = iota
+	outJSON
+	outJSONL
+)
+
+// extractOutputFlags strips --json/--jsonl (and short -j) from argv.
+// Returned args are safe to feed to the per-command flag parser, which
+// therefore never has to know about output shape. Duplicate/conflicting
+// output flags are collapsed with a "last one wins" rule — boring but
+// predictable.
+func extractOutputFlags(args []string) (outputMode, []string) {
+	mode := outText
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		switch a {
+		case "--json", "-j":
+			mode = outJSON
+		case "--jsonl":
+			mode = outJSONL
+		default:
+			out = append(out, a)
+		}
+	}
+	return mode, out
+}
+
+// emitJSON writes v to stdout as indented JSON with a trailing newline.
+// Uses json.Encoder so streams stay flush-happy.
+func emitJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+// emitJSONL writes each element of vs as its own compact JSON line.
+// Suitable for `jq -c` pipelines and large lists.
+func emitJSONL(vs []api.Instance) error {
+	enc := json.NewEncoder(os.Stdout)
+	for i := range vs {
+		if err := enc.Encode(vs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func cmdLogin() error {
 	h, err := hushClient()
 	if err != nil {
@@ -173,6 +258,10 @@ func cmdLogout() error {
 }
 
 func cmdWhoami() error {
+	mode, rest := extractOutputFlags(os.Args[1:])
+	if len(rest) > 0 {
+		return fmt.Errorf("whoami takes no positional arguments (got %v)", rest)
+	}
 	c, err := newAPIClient()
 	if err != nil {
 		return err
@@ -181,16 +270,20 @@ func cmdWhoami() error {
 	if err != nil {
 		return err
 	}
+	if mode == outJSON || mode == outJSONL {
+		return emitJSON(w)
+	}
 	fmt.Printf("user:   %s\n", w.User)
 	fmt.Printf("groups: %s\n", strings.Join(w.Groups, ", "))
 	return nil
 }
 
 func cmdList() error {
+	mode, rest := extractOutputFlags(os.Args[1:])
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
 	from := fs.String("from", "", "start of window (ISO 8601 or 'YYYY-MM-DD')")
 	to := fs.String("to", "", "end of window (ISO 8601 or 'YYYY-MM-DD')")
-	if err := fs.Parse(os.Args[1:]); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		return err
 	}
 	fromISO, err := parseWhen(*from)
@@ -209,6 +302,18 @@ func cmdList() error {
 	if err != nil {
 		return err
 	}
+	switch mode {
+	case outJSON:
+		// Always emit the array — even when empty — so downstream `jq`
+		// gets `[]` instead of `null`. A machine consumer expecting an
+		// array shouldn't have to special-case the empty case.
+		if events == nil {
+			events = []api.Instance{}
+		}
+		return emitJSON(events)
+	case outJSONL:
+		return emitJSONL(events)
+	}
 	if len(events) == 0 {
 		fmt.Println("(no events in window)")
 		return nil
@@ -218,7 +323,7 @@ func cmdList() error {
 	for _, e := range events {
 		when := formatWhen(e.Dtstart, e.AllDay)
 		if e.Recurring {
-			when += " ↻"
+			when += " \u21bb"
 		}
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", e.ID, when, e.Title, e.Location)
 	}
@@ -226,7 +331,8 @@ func cmdList() error {
 }
 
 func cmdAdd() error {
-	title, flags, err := parseAddFlags(os.Args[1:])
+	mode, rest := extractOutputFlags(os.Args[1:])
+	title, flags, err := parseAddFlags(rest)
 	if err != nil {
 		return err
 	}
@@ -263,14 +369,15 @@ func cmdAdd() error {
 	if err != nil {
 		return err
 	}
-	return prettyPrint(e)
+	return renderEvent(e, mode)
 }
 
 func cmdGet() error {
-	if len(os.Args) < 2 {
+	mode, rest := extractOutputFlags(os.Args[1:])
+	if len(rest) < 1 {
 		return fmt.Errorf("usage: kcal get <id>")
 	}
-	id, err := strconv.ParseInt(os.Args[1], 10, 64)
+	id, err := strconv.ParseInt(rest[0], 10, 64)
 	if err != nil {
 		return fmt.Errorf("id must be integer: %w", err)
 	}
@@ -282,18 +389,19 @@ func cmdGet() error {
 	if err != nil {
 		return err
 	}
-	return prettyPrint(e)
+	return renderEvent(e, mode)
 }
 
 func cmdUpdate() error {
-	if len(os.Args) < 2 {
+	mode, rest := extractOutputFlags(os.Args[1:])
+	if len(rest) < 1 {
 		return fmt.Errorf("usage: kcal mv <id> [flags]")
 	}
-	id, err := strconv.ParseInt(os.Args[1], 10, 64)
+	id, err := strconv.ParseInt(rest[0], 10, 64)
 	if err != nil {
 		return fmt.Errorf("id must be integer: %w", err)
 	}
-	_, flags, err := parseAddFlags(os.Args[2:]) // reuse the same parser; title from --title
+	_, flags, err := parseAddFlags(rest[1:]) // reuse the same parser; title from --title
 	if err != nil {
 		return err
 	}
@@ -335,14 +443,15 @@ func cmdUpdate() error {
 	if err != nil {
 		return err
 	}
-	return prettyPrint(e)
+	return renderEvent(e, mode)
 }
 
 func cmdDelete() error {
-	if len(os.Args) < 2 {
+	mode, rest := extractOutputFlags(os.Args[1:])
+	if len(rest) < 1 {
 		return fmt.Errorf("usage: kcal rm <id>")
 	}
-	id, err := strconv.ParseInt(os.Args[1], 10, 64)
+	id, err := strconv.ParseInt(rest[0], 10, 64)
 	if err != nil {
 		return fmt.Errorf("id must be integer: %w", err)
 	}
@@ -353,20 +462,24 @@ func cmdDelete() error {
 	if err := c.Delete(id); err != nil {
 		return err
 	}
+	if mode == outJSON || mode == outJSONL {
+		return emitJSON(map[string]any{"deleted": id})
+	}
 	fmt.Printf("deleted %d\n", id)
 	return nil
 }
 
 func cmdShare() error {
-	if len(os.Args) < 4 {
+	mode, rest := extractOutputFlags(os.Args[1:])
+	if len(rest) < 3 {
 		return fmt.Errorf("usage: kcal share <id> <user> <perm>[,<perm>...]")
 	}
-	id, err := strconv.ParseInt(os.Args[1], 10, 64)
+	id, err := strconv.ParseInt(rest[0], 10, 64)
 	if err != nil {
 		return fmt.Errorf("id must be integer: %w", err)
 	}
-	user := os.Args[2]
-	perms := strings.Split(os.Args[3], ",")
+	user := rest[1]
+	perms := strings.Split(rest[2], ",")
 	for i := range perms {
 		perms[i] = strings.TrimSpace(perms[i])
 	}
@@ -377,8 +490,24 @@ func cmdShare() error {
 	if err := c.Share(id, user, perms); err != nil {
 		return err
 	}
+	if mode == outJSON || mode == outJSONL {
+		return emitJSON(map[string]any{
+			"event_id":    id,
+			"username":    user,
+			"permissions": perms,
+		})
+	}
 	fmt.Printf("shared %d with %s: %s\n", id, user, strings.Join(perms, ","))
 	return nil
+}
+
+// renderEvent emits a single event either as JSON (any --json mode) or
+// as the default JSON — there's no human-friendlier shape for a single
+// event row that's more useful than pretty JSON, so text-mode falls
+// through to the same output. (`ls` is where the tabwriter earns its
+// keep.)
+func renderEvent(e *api.Event, _ outputMode) error {
+	return emitJSON(e)
 }
 
 // ── flag parsing ──────────────────────────────────────────────────────
@@ -490,8 +619,4 @@ func formatWhen(iso string, allDay bool) string {
 	return local.Format("2006-01-02 15:04")
 }
 
-func prettyPrint(v any) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
-}
+func prettyPrint(v any) error { return emitJSON(v) }
