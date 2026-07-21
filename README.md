@@ -8,13 +8,38 @@ OIDC's RFC 8628 device authorization flow. Refresh token stored in the
 ```
 kcal login                                     # RFC 8628 device flow
 kcal whoami
-kcal ls [--from DATE] [--to DATE]
-kcal add "Dentist" --at "2026-07-30 09:00" --loc "Peachtree Smiles"
-kcal get <id>
-kcal mv <id> --at "2026-07-30 10:00" --title "…"
-kcal rm <id>
-kcal share <id> <user> Read,Write,Delete,Share
+kcal ls [--from DATE] [--to DATE] [--json|--jsonl]
+kcal add "Dentist" --at "2026-07-30 09:00" --loc "Peachtree Smiles" [--json]
+kcal get <id> [--json]
+kcal mv <id> --at "2026-07-30 10:00" --title "…" [--json]
+kcal rm <id> [--json]
+kcal share <id> <user> Read,Write,Delete,Share [--json]
 kcal logout
+kcal --version
+```
+
+## Machine-readable output
+
+Follows [clig.dev](https://clig.dev/) conventions:
+
+- **`--json`** (also `-j`) — emit JSON on stdout instead of the human table
+  or labeled text. Works on every data-producing command:
+  `ls`, `whoami`, `add`, `get`, `mv`, `rm`, `share`.
+- **`--jsonl`** — emit [JSON Lines](https://jsonlines.org/) (one compact
+  object per line). `ls` only. Streams cleanly through `jq -c`.
+- Empty lists emit `[]`, never `null`.
+- Errors and diagnostics go to **stderr**; data goes to **stdout**.
+- Broken downstream pipes (`kcal ls --json | head`) exit silently, no
+  stack trace.
+- Exit codes: `0` success, `1` runtime error, `2` misuse (bad flags,
+  missing args).
+
+Example:
+
+```bash
+kcal ls --from 2026-07-01 --to 2026-07-31 --json | jq '.[] | select(.location=="Maple Street Guitar")'
+kcal ls --jsonl | jq -c '{id, title, when: .dtstart}'
+kcal get 15 --json | jq -r .location
 ```
 
 ## Auth model
