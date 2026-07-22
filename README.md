@@ -72,7 +72,7 @@ roll to 00:00 local.
 ## Prerequisites
 
 - `hush up -d` running.
-- Membership in the `gluck-calendar-create` lldap group to create events.
+- Membership in the `calendar-create` lldap group to create events.
 
 ## History
 
