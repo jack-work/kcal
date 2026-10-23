@@ -14,6 +14,9 @@ kcal get <id> [--json]
 kcal mv <id> --at "2026-07-30 10:00" --title "…" [--json]
 kcal rm <id> [--json]
 kcal share <id> <user> Read,Write,Delete,Share [--json]
+kcal grant <user> [--json]                     # <user> may read your whole calendar
+kcal grants [--json]
+kcal revoke <user>
 kcal logout
 kcal --version
 ```
@@ -24,7 +27,7 @@ Follows [clig.dev](https://clig.dev/) conventions:
 
 - **`--json`** (also `-j`) — emit JSON on stdout instead of the human table
   or labeled text. Works on every data-producing command:
-  `ls`, `whoami`, `add`, `get`, `mv`, `rm`, `share`.
+  `ls`, `whoami`, `add`, `get`, `mv`, `rm`, `share`, `grant`, `grants`.
 - **`--jsonl`** — emit [JSON Lines](https://jsonlines.org/) (one compact
   object per line). `ls` only. Streams cleanly through `jq -c`.
 - Empty lists emit `[]`, never `null`.

@@ -191,6 +191,39 @@ func (c *Client) Share(id int64, username string, perms []string) error {
 // Whoami is unauthenticated-friendly on our server (it just echoes back
 // the resolved Remote-User); useful for confirming the bearer token is
 // wired up correctly.
+type CalendarShare struct {
+	Owner       string   `json:"owner"`
+	Grantee     string   `json:"grantee"`
+	Permissions []string `json:"permissions"`
+	CreatedAt   string   `json:"created_at,omitempty"`
+}
+
+type SharesResp struct {
+	Granted  []CalendarShare `json:"granted"`
+	Received []CalendarShare `json:"received"`
+}
+
+func (c *Client) Grants() (*SharesResp, error) {
+	var s SharesResp
+	if err := c.do(http.MethodGet, "/shares", nil, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (c *Client) Grant(grantee string) (*CalendarShare, error) {
+	var s CalendarShare
+	req := map[string]any{"grantee": grantee, "permissions": []string{"Read"}}
+	if err := c.do(http.MethodPost, "/shares", req, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (c *Client) Revoke(grantee string) error {
+	return c.do(http.MethodDelete, "/shares/"+url.PathEscape(grantee), nil, nil)
+}
+
 type WhoamiResp struct {
 	User   string   `json:"user"`
 	Groups []string `json:"groups"`

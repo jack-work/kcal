@@ -85,6 +85,12 @@ func main() {
 		err = cmdDelete()
 	case "share":
 		err = cmdShare()
+	case "grant":
+		err = cmdGrant()
+	case "grants":
+		err = cmdGrants()
+	case "revoke":
+		err = cmdRevoke()
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return
@@ -120,6 +126,9 @@ commands:
   mv <id> [flags]                    update fields on an event
   rm  <id>                           delete an event
   share <id> <user> <perms>          grant permissions (Read,Write,Delete,Share)
+  grant <user>                       let <user> read your whole calendar, now and later
+  grants                             calendar shares you granted and received
+  revoke <user>                      withdraw a calendar share
 
 add / mv flags:
   --at "WHEN"           start time  (ISO 8601 or "2026-07-30 09:00")
@@ -131,7 +140,7 @@ add / mv flags:
   --title "TITLE"       (mv only) rename the event
 
 machine-readable output (see clig.dev):
-  --json                emit JSON on stdout (ls, whoami, add, get, mv, share)
+  --json                emit JSON on stdout (ls, whoami, add, get, mv, share, grant, grants)
   --jsonl               emit JSON Lines, one object per line (ls only)
 
 global:
@@ -498,6 +507,69 @@ func cmdShare() error {
 		})
 	}
 	fmt.Printf("shared %d with %s: %s\n", id, user, strings.Join(perms, ","))
+	return nil
+}
+
+func cmdGrant() error {
+	mode, rest := extractOutputFlags(os.Args[1:])
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: kcal grant <user>")
+	}
+	c, err := newAPIClient()
+	if err != nil {
+		return err
+	}
+	s, err := c.Grant(rest[0])
+	if err != nil {
+		return err
+	}
+	if mode == outJSON || mode == outJSONL {
+		return emitJSON(s)
+	}
+	fmt.Printf("%s may read %s's calendar\n", s.Grantee, s.Owner)
+	return nil
+}
+
+func cmdGrants() error {
+	mode, rest := extractOutputFlags(os.Args[1:])
+	if len(rest) != 0 {
+		return fmt.Errorf("usage: kcal grants")
+	}
+	c, err := newAPIClient()
+	if err != nil {
+		return err
+	}
+	s, err := c.Grants()
+	if err != nil {
+		return err
+	}
+	if mode == outJSON || mode == outJSONL {
+		return emitJSON(s)
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "DIRECTION\tOWNER\tGRANTEE\tPERMISSIONS")
+	for _, g := range s.Granted {
+		fmt.Fprintf(tw, "granted\t%s\t%s\t%s\n", g.Owner, g.Grantee, strings.Join(g.Permissions, ","))
+	}
+	for _, g := range s.Received {
+		fmt.Fprintf(tw, "received\t%s\t%s\t%s\n", g.Owner, g.Grantee, strings.Join(g.Permissions, ","))
+	}
+	return tw.Flush()
+}
+
+func cmdRevoke() error {
+	_, rest := extractOutputFlags(os.Args[1:])
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: kcal revoke <user>")
+	}
+	c, err := newAPIClient()
+	if err != nil {
+		return err
+	}
+	if err := c.Revoke(rest[0]); err != nil {
+		return err
+	}
+	fmt.Printf("revoked %s\n", rest[0])
 	return nil
 }
 
